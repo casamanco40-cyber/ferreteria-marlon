@@ -22,16 +22,14 @@ import json
 import requests
 #import webview  # Importamos pywebview para la ventana nativa
 
-# Configuración de rutas corregida para que lea siempre la carpeta templates correctamente
+# Configuración automática de rutas para PC y Servidor en la nube
 if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
     template_folder = os.path.join(sys._MEIPASS, 'templates')
     static_folder = os.path.join(sys._MEIPASS, 'static')
     app = Flask(__name__, template_folder=template_folder, static_folder=static_folder)
 else:
-    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    template_dir = os.path.join(BASE_DIR, 'templates')
-    app = Flask(__name__, template_folder=template_dir)
+    app = Flask(__name__, template_folder='templates', static_folder='static')
+
 
 app.secret_key = os.getenv("SECRET_KEY", "ferreteria_marlon_secret_key_2026")
 
