@@ -22,6 +22,12 @@ import json
 import requests
 #import webview  # Importamos pywebview para la ventana nativa
 
+# Ruta principal del programa
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Configuración automática de rutas para PC y Servidor en la nube
 if getattr(sys, 'frozen', False):
     template_folder = os.path.join(sys._MEIPASS, 'templates')
