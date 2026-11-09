@@ -20,7 +20,7 @@ from werkzeug.utils import secure_filename
 import sqlite3
 import json
 import requests
-import webview  # Importamos pywebview para la ventana nativa
+#import webview  # Importamos pywebview para la ventana nativa
 
 # Configuración de rutas corregida para que lea siempre la carpeta templates correctamente
 if getattr(sys, 'frozen', False):
