@@ -94,13 +94,48 @@ cargar_credenciales_guardadas()
 
 
 def get_db_connection():
-  username = session.get("username", "admin")
-  config_sucursal = DATOS_SUCURSALES.get(username, DATOS_SUCURSALES["admin"])
-  db_name = config_sucursal["db"]
-  db_path = os.path.join(BASE_DIR, db_name)
-  conn = sqlite3.connect(db_path, timeout=10)
-  conn.row_factory = sqlite3.Row
-  return conn
+    class SupabaseSQLAdapter:
+        def __init__(self):
+            self.headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc_val, exc_tb): pass
+        def cursor(self): return self
+        def commit(self): pass
+        def rollback(self): pass
+        
+        def execute(self, query, params=None):
+            import requests
+            q_upper = query.strip().upper()
+            # Traductor automático: Convierte las consultas clásicas de productos a la API de Supabase
+            if q_upper.startswith("SELECT") and "PRODUCTOS" in q_upper:
+                url = f"{SUPABASE_URL}/rest/v1/productos?order=id.desc"
+                r = requests.get(url, headers=self.headers)
+                self._results = r.json() if r.status_code == 200 else []
+            elif q_upper.startswith("INSERT INTO PRODUCTOS"):
+                url = f"{SUPABASE_URL}/rest/v1/productos"
+                payload = {
+                    "nombre": params[0], "proveedor": params[1],
+                    "precio_compra": params[2], "precio_venta": params[3],
+                    "stock": params[5], "imagen_url": params[6]
+                }
+                requests.post(url, json=payload, headers=self.headers)
+                self._results = []
+            elif q_upper.startswith("UPDATE PRODUCTOS"):
+                url = f"{SUPABASE_URL}/rest/v1/productos?id=eq.{params[-1]}"
+                payload = {"nombre": params[0], "proveedor": params[1], "precio_compra": params[2], "precio_venta": params[3], "stock": params[5]}
+                if len(params) == 8: payload["imagen_url"] = params[6]
+                requests.patch(url, json=payload, headers=self.headers)
+                self._results = []
+            else:
+                self._results = []
+        def fetchall(self): return self._results
+        def fetchone(self): return self._results[0] if self._results else None
+    return SupabaseSQLAdapter()
 
 
 def init_db_for_all():
