@@ -108,10 +108,7 @@ def get_db_connection():
         conn.row_factory = sqlite3.Row
         return conn
 
-    return psycopg2.connect(
-        database_url,
-        cursor_factory=psycopg2.extras.DictCursor
-    )
+    # PostgreSQL/Supabase: importar el controlador antes de usarlo.
     try:
         import psycopg2
         import psycopg2.extras
