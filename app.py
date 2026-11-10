@@ -95,14 +95,23 @@ cargar_credenciales_guardadas()
 
 
 def get_db_connection():
-    """Conexión PostgreSQL para Render/Supabase; SQLite queda para el modo local."""
+    """Conexión PostgreSQL para Render/Supabase; SQLite para modo local."""
     database_url = os.getenv("DATABASE_URL", "").strip()
-    if not database_url:
-        # Modo local de escritorio: conserva las bases SQLite independientes.
-        usuario = session.get("sucursal", "admin") if has_request_context() else "admin"
-        archivo = DATOS_SUCURSALES.get(usuario, DATOS_SUCURSALES["admin"])["db"]
-        return sqlite3.connect(os.path.join(BASE_DIR, archivo))
 
+    if not database_url:
+        usuario = session.get("sucursal", "admin") if has_request_context() else "admin"
+        archivo = DATOS_SUCURSALES.get(
+            usuario, DATOS_SUCURSALES["admin"]
+        )["db"]
+
+        conn = sqlite3.connect(os.path.join(BASE_DIR, archivo))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    return psycopg2.connect(
+        database_url,
+        cursor_factory=psycopg2.extras.DictCursor
+    )
     try:
         import psycopg2
         import psycopg2.extras
