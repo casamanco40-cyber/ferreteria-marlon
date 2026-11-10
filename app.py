@@ -14,6 +14,7 @@ from flask import (
     send_from_directory,
     url_for,
     session,
+    has_request_context,
 )
 from functools import wraps
 from werkzeug.utils import secure_filename
@@ -43,7 +44,7 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-APIS_NET_PE_TOKEN = os.getenv("APIS_NET_PE_TOKEN", "apis-token-1.aT0D-y2557.70298")
+APIS_NET_PE_TOKEN = os.getenv("APIS_NET_PE_TOKEN", "")
 
 CREDENCIALES_SUCURSALES = {
     "admin": "123456",
@@ -94,48 +95,145 @@ cargar_credenciales_guardadas()
 
 
 def get_db_connection():
-    class SupabaseSQLAdapter:
-        def __init__(self):
-            self.headers = {
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=representation"
-            }
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc_val, exc_tb): pass
-        def cursor(self): return self
-        def commit(self): pass
-        def rollback(self): pass
-        
+    """Conexión PostgreSQL para Render/Supabase; SQLite queda para el modo local."""
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        # Modo local de escritorio: conserva las bases SQLite independientes.
+        usuario = session.get("sucursal", "admin") if has_request_context() else "admin"
+        archivo = DATOS_SUCURSALES.get(usuario, DATOS_SUCURSALES["admin"])["db"]
+        return sqlite3.connect(os.path.join(BASE_DIR, archivo))
+
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except ImportError as exc:
+        raise RuntimeError("Falta instalar psycopg2-binary. Agrégalo a requirements.txt y vuelve a desplegar.") from exc
+
+    sucursal = session.get("sucursal", "admin")
+    if sucursal not in ("admin", "tienda2"):
+        sucursal = "admin"
+
+    TABLAS = {
+        "productos", "ventas", "detalle_ventas", "proformas", "detalle_proforma",
+        "proveedores", "compras_proveedores", "detalle_compras", "gastos"
+    }
+
+    class RowCursor:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.lastrowid = None
+        @property
+        def rowcount(self): return self._cursor.rowcount
+        @property
+        def description(self): return self._cursor.description
+        def fetchone(self): return self._cursor.fetchone()
+        def fetchall(self): return self._cursor.fetchall()
+        def close(self): return self._cursor.close()
+
         def execute(self, query, params=None):
-            import requests
-            q_upper = query.strip().upper()
-            # Traductor automático: Convierte las consultas clásicas de productos a la API de Supabase
-            if q_upper.startswith("SELECT") and "PRODUCTOS" in q_upper:
-                url = f"{SUPABASE_URL}/rest/v1/productos?order=id.desc"
-                r = requests.get(url, headers=self.headers)
-                self._results = r.json() if r.status_code == 200 else []
-            elif q_upper.startswith("INSERT INTO PRODUCTOS"):
-                url = f"{SUPABASE_URL}/rest/v1/productos"
-                payload = {
-                    "nombre": params[0], "proveedor": params[1],
-                    "precio_compra": params[2], "precio_venta": params[3],
-                    "stock": params[5], "imagen_url": params[6]
-                }
-                requests.post(url, json=payload, headers=self.headers)
-                self._results = []
-            elif q_upper.startswith("UPDATE PRODUCTOS"):
-                url = f"{SUPABASE_URL}/rest/v1/productos?id=eq.{params[-1]}"
-                payload = {"nombre": params[0], "proveedor": params[1], "precio_compra": params[2], "precio_venta": params[3], "stock": params[5]}
-                if len(params) == 8: payload["imagen_url"] = params[6]
-                requests.patch(url, json=payload, headers=self.headers)
-                self._results = []
-            else:
-                self._results = []
-        def fetchall(self): return self._results
-        def fetchone(self): return self._results[0] if self._results else None
-    return SupabaseSQLAdapter()
+            import re
+            sql = str(query).strip()
+            valores = list(params or ())
+            upper = sql.upper()
+
+            # Funciones SQLite usadas por el sistema -> PostgreSQL.
+            sql = re.sub(r"datetime\s*\(\s*'now'\s*,\s*'localtime'\s*\)", "CURRENT_TIMESTAMP", sql, flags=re.I)
+            sql = re.sub(r"CAST\s*\(\s*strftime\s*\(\s*'%m'\s*,\s*([\w.]+)\s*\)\s*AS\s*INTEGER\s*\)", r"EXTRACT(MONTH FROM \1)::int", sql, flags=re.I)
+            sql = re.sub(r"strftime\s*\(\s*'%Y'\s*,\s*([\w.]+)\s*\)", r"EXTRACT(YEAR FROM \1)::text", sql, flags=re.I)
+            sql = re.sub(r"strftime\s*\(\s*'%m'\s*,\s*([\w.]+)\s*\)", r"EXTRACT(MONTH FROM \1)", sql, flags=re.I)
+
+            # Todas las consultas quedan limitadas a la sucursal autenticada.
+            if upper.startswith("SELECT"):
+                encontrados = []
+                patron = r"\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)\s*(?:AS\s+)?([a-z_][a-z0-9_]*)?"
+                reservadas = {"WHERE", "LEFT", "RIGHT", "INNER", "JOIN", "ON", "ORDER", "GROUP", "LIMIT", "OFFSET", "HAVING"}
+                for m in re.finditer(patron, sql, flags=re.I):
+                    tabla = m.group(1).lower()
+                    alias = (m.group(2) or tabla).lower()
+                    if alias.upper() in reservadas: alias = tabla
+                    if tabla in TABLAS:
+                        item = (tabla, alias)
+                        if item not in encontrados: encontrados.append(item)
+                if encontrados:
+                    condiciones = [f"{alias}.sucursal_id = %s" for _, alias in encontrados]
+                    corte = re.search(r"\b(GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET)\b", sql, flags=re.I)
+                    pos = corte.start() if corte else len(sql)
+                    antes, despues = sql[:pos].rstrip(), sql[pos:]
+                    if re.search(r"\bWHERE\b", antes, flags=re.I):
+                        antes += " AND " + " AND ".join(condiciones)
+                    else:
+                        antes += " WHERE " + " AND ".join(condiciones)
+                    sql = antes + (" " + despues if despues else "")
+                    valores.append(sucursal)
+                    valores.extend([sucursal] * (len(encontrados)-1))
+
+            elif upper.startswith("INSERT INTO"):
+                m = re.search(r"(INSERT\s+INTO\s+)([a-z_][a-z0-9_]*)\s*\(([^)]*)\)\s*(VALUES\s*\()([^)]*)(\))", sql, flags=re.I|re.S)
+                if m and m.group(2).lower() in TABLAS:
+                    cols = m.group(3)
+                    vals = m.group(5)
+                    if "sucursal_id" not in [c.strip().strip('"').lower() for c in cols.split(',')]:
+                        sql = sql[:m.start(3)] + cols + ", sucursal_id" + sql[m.end(3):m.start(5)] + vals + ", %s" + sql[m.end(5):]
+                        valores.append(sucursal)
+                # RETURNING permite recuperar IDs autogenerados como lastrowid.
+                if re.search(r"\bRETURNING\b", sql, flags=re.I) is None:
+                    sql += " RETURNING id"
+
+            elif upper.startswith("UPDATE"):
+                m = re.match(r"UPDATE\s+([a-z_][a-z0-9_]*)", sql, flags=re.I)
+                if m and m.group(1).lower() in TABLAS:
+                    if re.search(r"\bWHERE\b", sql, flags=re.I): sql += " AND sucursal_id = %s"
+                    else: sql += " WHERE sucursal_id = %s"
+                    valores.append(sucursal)
+
+            elif upper.startswith("DELETE FROM"):
+                m = re.match(r"DELETE\s+FROM\s+([a-z_][a-z0-9_]*)", sql, flags=re.I)
+                if m and m.group(1).lower() in TABLAS:
+                    if re.search(r"\bWHERE\b", sql, flags=re.I): sql += " AND sucursal_id = %s"
+                    else: sql += " WHERE sucursal_id = %s"
+                    valores.append(sucursal)
+
+            # Los parámetros originales usan ? (SQLite); PostgreSQL usa %s.
+            sql = sql.replace("?", "%s")
+            cur = self._cursor
+            try:
+                cur.execute(sql, tuple(valores))
+            except Exception as exc:
+                # Mantiene compatible el manejo existente de RUC duplicado.
+                if exc.__class__.__name__ in ("UniqueViolation", "IntegrityError"):
+                    raise sqlite3.IntegrityError(str(exc)) from exc
+                raise
+            self.lastrowid = None
+            if upper.startswith("INSERT"):
+                fila = cur.fetchone()
+                if fila:
+                    try: self.lastrowid = fila[0]
+                    except Exception: self.lastrowid = fila.get("id")
+            return self
+
+    class PGConnection:
+        def __init__(self):
+            self._conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.DictCursor, sslmode="require", connect_timeout=15)
+            self._cursor = None
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                if exc_type: self._conn.rollback()
+                else: self._conn.commit()
+            finally: self._conn.close()
+            return False
+        def cursor(self):
+            self._cursor = RowCursor(self._conn.cursor())
+            return self._cursor
+        def execute(self, query, params=None):
+            cur = self.cursor()
+            cur.execute(query, params)
+            return cur
+        def commit(self): self._conn.commit()
+        def rollback(self): self._conn.rollback()
+        def close(self): self._conn.close()
+
+    return PGConnection()
 
 
 def init_db_for_all():
